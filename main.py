@@ -70,3 +70,14 @@ async def _fake_worker(job_id: str):
     except Exception as e:
         _JOBS[job_id].status = "error"
         _JOBS[job_id].message = f"error: {e}"
+
+
+import os
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),  # Railway sets PORT at runtime
+    )
