@@ -7,6 +7,17 @@ import asyncio
 # ---------- FastAPI app ----------
 app = FastAPI(title="Impactor API (bare bones)", version="0.0.1")
 
+
+
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # tighten later
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ---------- Health ----------
 @app.get("/health")
 def health():
