@@ -7,12 +7,11 @@ import asyncio
 import os
 
 # ---------- FastAPI app ----------
-app = FastAPI(title="Impactor API", version="0.0.3")
+app = FastAPI(title="Asteroid Simulation API", version="0.0.5")
 
-# Allow CORS for all origins (loosen later if needed)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # TODO: restrict later in production
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -20,17 +19,19 @@ app.add_middleware(
 # ---------- Health ----------
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "0.0.3"}
+    return {"ok": True, "version": "0.0.5"}
 
 # ---------- Input Models ----------
-class SimulationRequest(BaseModel):
-    scenario_id: Optional[str] = None
-    velocity: float   # m/s
-    angle: float      # degrees
-    density: float    # kg/m^3
-    diameter: float   # m
-    altitude: float   # m
-    target_material: str = "rock"
+class OrbitRequest(BaseModel):
+    fullName: str
+    epochMjd: float
+    a: float      # semi-major axis [AU]
+    e: float      # eccentricity
+    i: float      # inclination [deg]
+    node: float   # longitude of ascending node [deg]
+    peri: float   # argument of perihelion [deg]
+    M: float      # mean anomaly [deg]
+    success: bool = True
 
 # ---------- Three.js-compatible response ----------
 class ThreeJSObject(BaseModel):
@@ -43,29 +44,18 @@ class ThreeJSObject(BaseModel):
 
 class SimulationResponse(BaseModel):
     ok: bool
+    input_data: dict          # 👈 echo back request
     objects: List[ThreeJSObject]
 
 # ---------- Sync simulation ----------
 @app.post("/v1/simulate", response_model=SimulationResponse)
-def simulate_stub(req: SimulationRequest):
-    # Example: sphere for impactor
-    sphere = ThreeJSObject(
-        object="sphere",
-        radius=req.diameter / 2,
-        position={"x": 0, "y": req.altitude, "z": 0},
-        material={"color": "#ff0000"}
-    )
+def simulate_orbit(req: OrbitRequest):
+    """
+    For now this just builds a sphere representing the asteroid at epoch.
+    """
+   
 
-    # Example: ground plane
-    ground = ThreeJSObject(
-        object="plane",
-        width=500,
-        height=500,
-        position={"x": 0, "y": 0, "z": 0},
-        material={"color": "#00ff00"}
-    )
-
-    return SimulationResponse(ok=True, objects=[sphere, ground])
+    return SimulationResponse(ok=True, input_data=req.dict(), objects=[])
 
 # ---------- Async job pattern ----------
 class JobStatus(BaseModel):
@@ -73,12 +63,23 @@ class JobStatus(BaseModel):
     status: Literal["queued","running","done","error"] = "queued"
     message: Optional[str] = None
     input_data: Optional[dict] = None
-    result: Optional[SimulationResponse] = None  # store JSON result
+    result: Optional[SimulationResponse] = None
 
 _JOBS: Dict[str, JobStatus] = {}
 
+async def skaiciavimai(job_id: str, req: OrbitRequest):
+    try:
+        _JOBS[job_id].status = "running"
+        await asyncio.sleep(2)  # simulate computation
+        res = simulate_orbit(req)
+        _JOBS[job_id].status = "done"
+        _JOBS[job_id].result = res
+    except Exception as e:
+        _JOBS[job_id].status = "error"
+        _JOBS[job_id].message = str(e)
+
 @app.post("/v1/jobs", status_code=202)
-async def create_job(req: SimulationRequest):
+async def create_job(req: OrbitRequest):
     job_id = str(uuid4())
     _JOBS[job_id] = JobStatus(
         job_id=job_id,
