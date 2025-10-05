@@ -1,11 +1,12 @@
 ﻿from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 from typing import Optional
 import numpy as np
 import scipy as scp
 import os
 import json
+import uvicorn
 
 ##########################################################################################################
 # === PHYSICAL CONSTANTS ===
@@ -133,15 +134,21 @@ def calculate_impact_radii(d_km, density, v, target_density=R_E_DENSITY, angle_d
 ##########################################################################################################
 # === FASTAPI APP ===
 ##########################################################################################################
-app = FastAPI(title="Asteroid Simulation API", version="1.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(title="Asteroid Simulation API", version="1.0.0")
 
-# ===========================================================
-# 🛰️ Request Model (fixed spkid + validation)
-# ===========================================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # ✅ allow Android / localhost / Railway access
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+##########################################################################################################
+# === REQUEST MODEL ===
+##########################################################################################################
 class OrbitRequest(BaseModel):
     fullName: str
-    spkid: str | int   # allow both int or str
+    spkid: str
     a: Optional[float] = 1.46
     e: Optional[float] = 0.223
     i: Optional[float] = 10.8
@@ -149,21 +156,14 @@ class OrbitRequest(BaseModel):
     peri: Optional[float] = 179.0
     M: Optional[float] = 311.0
 
-    @field_validator("spkid", mode="before")
-    def convert_spkid(cls, v):
-        """Ensure spkid is always a string."""
-        return str(v)
 
-
-# ===========================================================
-# 🚀 Simulation Endpoint
-# ===========================================================
+##########################################################################################################
+# === MAIN SIMULATION ENDPOINT ===
+##########################################################################################################
 @app.post("/v1/simulate")
 def simulate(req: OrbitRequest):
     try:
-        print(f"📡 Received request for {req.fullName} ({req.spkid})")
-
-        # --- Earth orbital params ---
+        # --- Earth orbit ---
         a0_EM = 1.00000018 * AU
         da_EM = -0.00000003 * AU / (3.1556926e9)
         e0 = 0.01673163
@@ -177,7 +177,7 @@ def simulate(req: OrbitRequest):
         Omega0 = -5.11260389
         dOmega = -0.24123856 / (3.1556926e9)
 
-        # --- Compute trajectories ---
+        # --- Earth trajectory ---
         T = np.linspace(0, 5 * 365.25 * 86400, 6000)
         r_EM = np.array([
             compute_r_ecl_planet(t, a0_EM, e0, I0, L0, w0_bar, Omega0,
@@ -185,6 +185,7 @@ def simulate(req: OrbitRequest):
             for t in T
         ])
 
+        # --- Asteroid parameters ---
         a_ast, e_ast, i_ast, w_ast, node_ast, M_ast = (
             req.a * AU,
             req.e,
@@ -197,27 +198,21 @@ def simulate(req: OrbitRequest):
         r_ast0, v_ast0 = compute_r_and_v_small_body(a_ast, e_ast, i_ast, w_ast, node_ast, M_ast)
         y0 = np.hstack([r_ast0, v_ast0])
 
+        # --- Differential Equation Integration ---
         def deriv(t, y):
             r = y[:3]
             a_vec = ast_accel(t, r, a0_EM, e0, I0, L0, w0_bar, Omega0,
                               da_EM, de, dI, dL, dw_bar, dOmega)
             return np.concatenate([y[3:], a_vec])
 
-        sol = scp.integrate.solve_ivp(
-            deriv, (T[0], T[-1]), y0, t_eval=T, rtol=1e-9, atol=1e-12
-        )
-
-        # --- Compute impact physics ---
+        sol = scp.integrate.solve_ivp(deriv, (T[0], T[-1]), y0, t_eval=T, rtol=1e-9, atol=1e-12)
         v_mean = np.mean(np.linalg.norm(sol.y[3:], axis=0))
+
+        # --- Impact Physics ---
         crater = calculate_impact_radii(1.0, 3000, v_mean)
         if "Error" in crater:
-            crater = {
-                "Final Crater Diameter (km)": 0,
-                "Blast Radius (km)": 0,
-                "Thermal Burn Radius (km)": 0,
-            }
+            crater = {"Final Crater Diameter (km)": 0, "Blast Radius (km)": 0, "Thermal Burn Radius (km)": 0}
 
-        # --- Data Packaging ---
         data = {
             "x_ast": sol.y[0, :].tolist(),
             "y_ast": sol.y[1, :].tolist(),
@@ -232,26 +227,20 @@ def simulate(req: OrbitRequest):
             },
         }
 
-        # --- Write file for R3F frontend ---
-        out_path = "public/assets/r3f_demo/assets/data"
-        os.makedirs(out_path, exist_ok=True)
-        file_path = os.path.join(out_path, "asteroid_data.json")
-
-        with open(file_path, "w") as f:
+        # --- Write JSON for visualization ---
+        os.makedirs("public/assets/r3f_demo/assets/data", exist_ok=True)
+        with open("public/assets/r3f_demo/assets/data/asteroid_data.json", "w") as f:
             json.dump(data, f, indent=2)
 
-        print(f"💾 JSON saved → {file_path}")
-
-        return {
-            "ok": True,
-            "input": req.dict(),
-            "summary": {
-                "points": len(T),
-                "mean_velocity": v_mean,
-                "impact_radius_km": crater["Blast Radius (km)"],
-            },
-            "file_path": file_path,
-        }
+        return {"ok": True, "input": req.dict(), "data": data}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Simulation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+##########################################################################################################
+# === ENTRY POINT ===
+##########################################################################################################
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))  # Railway sets PORT automatically
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
